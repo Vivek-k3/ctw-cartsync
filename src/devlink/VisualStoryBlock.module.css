@@ -1,0 +1,210 @@
+.about_timeline {
+  display: grid;
+  grid-auto-columns: 1fr;
+  grid-column-gap: 2rem;
+  grid-row-gap: 2rem;
+  grid-template-columns: 0.6fr 1fr;
+  grid-template-rows: auto;
+}
+
+@media screen and (max-width: 479px) {
+  .about_timeline {
+    grid-column-gap: 1.5rem;
+    grid-row-gap: 1.5rem;
+    grid-template-columns: 1fr;
+  }
+}
+
+.about_timeline-block {
+  display: flex;
+  width: 100%;
+  justify-content: flex-end;
+  align-items: flex-start;
+}
+
+@media screen and (max-width: 479px) {
+  .about_timeline-block {
+    justify-content: flex-start;
+    align-items: center;
+  }
+}
+
+.about_timeline-block.is-content {
+  justify-content: flex-start;
+  align-items: flex-start;
+}
+
+@media screen and (max-width: 479px) {
+  .about_timeline-block.is-content {
+    margin-bottom: 8rem;
+    padding-right: 3rem;
+    padding-left: 3rem;
+  }
+}
+
+.about_timeline-block.is-content.is-last {
+  justify-content: flex-start;
+  align-items: flex-end;
+}
+
+@media screen and (max-width: 479px) {
+  .about_timeline-block.is-content.is-last {
+    margin-bottom: 2rem;
+  }
+}
+
+.about-max-width-small {
+  position: sticky;
+  top: 3rem;
+
+  display: flex;
+  width: 100%;
+  max-width: 22rem;
+  padding-top: 2rem;
+  padding-bottom: 2rem;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  grid-column-gap: 0.75rem;
+  grid-row-gap: 0.75rem;
+}
+
+@media screen and (max-width: 479px) {
+  .about-max-width-small {
+    position: static;
+
+    display: flex;
+    max-width: 100%;
+    padding-top: 0rem;
+    padding-bottom: 0rem;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    grid-column-gap: 0.75rem;
+    grid-row-gap: 0.75rem;
+  }
+}
+
+@media screen and (max-width: 479px) {
+  .about-max-width-small:where(.w-variant-af3f6aff-40e8-4300-d856-30c4939e9403) {
+    padding-top: 0rem;
+  }
+}
+
+.about_timeline-heading {
+  font-size: 2.25rem;
+  line-height: 1.24;
+  font-weight: 500;
+}
+
+@media screen and (max-width: 991px) {
+  .about_timeline-heading:where(.w-variant-af3f6aff-40e8-4300-d856-30c4939e9403) {
+    font-size: 2rem;
+  }
+}
+
+@media screen and (max-width: 767px) {
+  .about_timeline-heading:where(.w-variant-af3f6aff-40e8-4300-d856-30c4939e9403) {
+    font-size: 1.5rem;
+  }
+}
+
+@media screen and (max-width: 479px) {
+  .about_timeline-heading {
+    font-size: 1.25rem;
+  }
+}
+
+.about_timeline-text-lg {
+  font-weight: 300;
+  font-size: clamp(1rem, 2.5svw, 1.125rem);
+  text-wrap: balance;
+}
+
+@media screen and (max-width: 479px) {
+  .about_timeline-text-lg {
+    font-size: 1rem;
+    font-weight: 400;
+  }
+}
+
+@media screen and (max-width: 479px) {
+  .about_timeline-text-lg:where(.w-variant-af3f6aff-40e8-4300-d856-30c4939e9403) {
+    font-size: 1rem;
+    font-weight: 400;
+  }
+}
+
+.about_timeline-text-lg p {
+  font-weight: 300;
+}
+
+.about_timeline-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.about_timeline-img:where(.w-variant-af3f6aff-40e8-4300-d856-30c4939e9403) {
+  aspect-ratio: 1/1;
+}
+
+.about_timeline-img:where(.w-variant-47dfff4a-a312-8eeb-8a12-c728a4985d49) {
+  aspect-ratio: 16/9;
+}
+
+.about_timeline-img:where(.w-variant-49bc3880-73cd-e3bf-4b5f-4239aa38872b) {
+  aspect-ratio: 4/3;
+}
+
+.about_timeline-img:where(.w-variant-6c4b39f4-6e8f-fa69-2c3e-48d3e53b80f4) {
+  aspect-ratio: 3/2;
+}
+
+.about_timeline-img:where(.w-variant-9d87090b-bed0-6d23-f49e-9727eca19ae6) {
+  display: none;
+}
+
+.video-wrapper:where(.w-variant-9d87090b-bed0-6d23-f49e-9727eca19ae6) {
+  width: 100%;
+  aspect-ratio: 1/1;
+  background-color: hsla(0, 0.00%, 57.33%, 1.00);
+}
+
+.video-wrapper.is-full {
+  width: 100%;
+  height: 100%;
+}
+
+.mux-player {
+  position: fixed;
+  width: 100%;
+  height: 100%;
+  filter: grayscale(100%);
+}
+
+.mux-player.about-player {
+  position: relative;
+}
+
+.mux-player.about-player:where(.w-variant-9d87090b-bed0-6d23-f49e-9727eca19ae6) {
+  display: block;
+  flex: 0 auto;
+}
+
+#w-node-_8893668d-a72f-5412-506b-3d11e31954d9-e31954d8 {
+}
+#w-node-_8893668d-a72f-5412-506b-3d11e31954df-e31954d8 {
+}
+#w-node-_8893668d-a72f-5412-506b-3d11e31954df-e31954d8:where(.w-variant-9d87090b-bed0-6d23-f49e-9727eca19ae6) {
+  grid-row-start: span 1;
+  grid-row-end: span 1;
+  grid-column-start: span 1;
+  grid-column-end: span 1;
+}
+@media screen and (max-width: 479px) {
+  #w-node-_8893668d-a72f-5412-506b-3d11e31954d9-e31954d8 {
+    order: 9999;
+  }
+  #w-node-_8893668d-a72f-5412-506b-3d11e31954df-e31954d8 {
+    order: -9999;
+  }
+}

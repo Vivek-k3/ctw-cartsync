@@ -1,0 +1,27 @@
+.wishlist-toggle {
+  display: flex;
+  width: 2rem;
+  height: 2rem;
+  padding: 0.2rem;
+  justify-content: center;
+  align-items: center;
+
+  border-radius: 0.375rem;
+
+  transition: all 200ms ease;
+
+  color: #6a7282;
+
+  cursor: pointer;
+}
+
+.wishlist-toggle:hover {
+  background-color: hsla(35.99999999999998, 27.71%, 88.93%, 1.00);
+}
+
+.wishlist-toggle.is-in-wishlist {
+  color: #333;
+}
+
+#w-node-b6348f19-e508-a2d4-884a-b82ba13ce69d-a13ce69d {
+}

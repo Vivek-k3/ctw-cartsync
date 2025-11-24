@@ -1,0 +1,54 @@
+.transition {
+  position: fixed;
+  left: 0%;
+  top: 0%;
+  right: 0%;
+  bottom: 0%;
+  z-index: 999999;
+
+  display: flex;
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+  justify-content: center;
+  align-items: center;
+
+  pointer-events: none;
+}
+
+.transition-sweeper {
+  position: absolute;
+  left: -100%;
+  top: 0%;
+  right: 0%;
+  bottom: 0%;
+
+  width: 100%;
+  height: 100%;
+
+  background-color: hsla(0, 0.00%, 0.00%, 0.94);
+
+  backdrop-filter: blur(0.625rem);
+}
+
+.nav_logo {
+  width: 10rem;
+}
+
+@media screen and (max-width: 767px) {
+  .nav_logo {
+    width: 7.5rem;
+  }
+}
+
+@media screen and (max-width: 479px) {
+  .nav_logo {
+    width: 7.5rem;
+  }
+}
+
+.nav_logo.is-loader {
+  position: absolute;
+  z-index: 1;
+  opacity: 0;
+}

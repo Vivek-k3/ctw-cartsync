@@ -1,0 +1,13 @@
+.shop_product-award-wrap {
+  width: 100%;
+  height: 100%;
+}
+
+@media screen and (max-width: 479px) {
+  .shop_award-o {
+    width: 3rem;
+  }
+}
+
+#w-node-bdbd8515-67b1-a0db-f2ba-d07c812de1ae-812de1ae {
+}
