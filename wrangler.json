@@ -10,5 +10,11 @@
   },
   "observability": {
     "enabled": true
+  },
+  "kv_namespaces": [
+  {
+    "binding": "CARTS_KV",
+    "id": "123456789"
   }
+]
 }
