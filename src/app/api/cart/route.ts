@@ -70,10 +70,12 @@ export async function GET(request: NextRequest) {
   const cart = await env.CARTS_KV.get<StoredCart>(cartKey, "json");
 
   if (!cart) {
+    // Return empty cart with version 0
     return jsonResponse({
       customerId,
       items: [],
       updatedAt: null,
+      version: 0,
     });
   }
 

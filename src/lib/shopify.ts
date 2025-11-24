@@ -10,12 +10,15 @@ export interface ShopifyCustomer {
 export interface CartItem {
   merchandiseId: string; // gid://shopify/ProductVariant/xxx
   quantity: number;
+  updatedAt: string; // ISO timestamp - when this item was last modified
+  deleted?: boolean; // soft delete for conflict resolution
 }
 
 export interface StoredCart {
   customerId: string; // gid://shopify/Customer/xxx
   items: CartItem[];
-  updatedAt: string; // ISO datetime
+  updatedAt: string; // ISO datetime - last change to any item
+  version: number; // for optimistic concurrency
 }
 
 export interface ShopifyConfig {
@@ -95,3 +98,40 @@ export function getCartKey(customerId: string): string {
   return `cart:${id}`;
 }
 
+// Server-side merge function
+export function mergeCarts(
+  local: { items: CartItem[] },
+  server: StoredCart
+): CartItem[] {
+  const map = new Map<string, CartItem>();
+
+  // Start from server as base
+  for (const item of server.items) {
+    map.set(item.merchandiseId, { ...item });
+  }
+
+  // Merge local items
+  for (const item of local.items) {
+    const existing = map.get(item.merchandiseId);
+
+    if (!existing) {
+      // Only in local - add it
+      map.set(item.merchandiseId, { ...item });
+      continue;
+    }
+
+    // Both present - last write wins by timestamp
+    const localTime = new Date(item.updatedAt).getTime();
+    const serverTime = new Date(existing.updatedAt).getTime();
+
+    if (localTime > serverTime) {
+      map.set(item.merchandiseId, { ...item });
+    }
+    // else keep server version (already in map)
+  }
+
+  // Filter out deleted items and zero quantity
+  return Array.from(map.values()).filter(
+    (it) => !it.deleted && it.quantity > 0
+  );
+}
