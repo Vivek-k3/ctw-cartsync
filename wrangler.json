@@ -16,5 +16,9 @@
     "binding": "CARTS_KV",
     "id": "123456789"
   }
-]
+],
+"vars": {
+  "SHOPIFY_STORE_DOMAIN": "shop.composingthewild.art",
+  "SHOPIFY_STOREFRONT_ACCESS_TOKEN": "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"
+}
 }
