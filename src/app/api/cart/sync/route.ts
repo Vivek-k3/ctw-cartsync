@@ -7,6 +7,7 @@ import {
   CartItem,
   ShopifyConfig,
   mergeCarts,
+  GuestCart,
 } from "@/lib/shopify";
 
 const corsHeaders = {
@@ -37,6 +38,40 @@ interface SyncCartBody {
   items: CartItem[];
   version?: number; // Client's last known version (for optimistic concurrency)
   forceOverwrite?: boolean; // Skip version check and merge - use client data as-is
+  guestCart?: GuestCart; // Guest cart to merge on login (sent once when transitioning from guest to logged-in)
+  isLoginMerge?: boolean; // Flag indicating this is a login merge operation
+}
+
+// Validate and normalize cart items - returns validated items or error string
+function validateCartItems(
+  items: unknown[],
+  now: string
+): { items: CartItem[] } | { error: string } {
+  const validated: CartItem[] = [];
+
+  for (const item of items) {
+    const i = item as Record<string, unknown>;
+
+    if (
+      typeof i.merchandiseId !== "string" ||
+      !i.merchandiseId.startsWith("gid://shopify/ProductVariant/")
+    ) {
+      return { error: `Invalid merchandiseId: ${i.merchandiseId}` };
+    }
+
+    if (typeof i.quantity !== "number" || i.quantity < 0) {
+      return { error: "quantity must be a non-negative number" };
+    }
+
+    validated.push({
+      merchandiseId: i.merchandiseId,
+      quantity: i.quantity,
+      updatedAt: (i.updatedAt as string) || now,
+      deleted: (i.deleted as boolean) || false,
+    });
+  }
+
+  return { items: validated };
 }
 
 // OPTIONS /api/cart/sync - CORS preflight
@@ -86,31 +121,11 @@ export async function POST(request: NextRequest) {
   const now = new Date().toISOString();
 
   // Validate and normalize cart items
-  const clientItems: CartItem[] = [];
-  for (const item of body.items) {
-    if (
-      typeof item.merchandiseId !== "string" ||
-      !item.merchandiseId.startsWith("gid://shopify/ProductVariant/")
-    ) {
-      return jsonResponse(
-        { error: `Invalid merchandiseId: ${item.merchandiseId}` },
-        400
-      );
-    }
-    if (typeof item.quantity !== "number" || item.quantity < 0) {
-      return jsonResponse(
-        { error: "quantity must be a non-negative number" },
-        400
-      );
-    }
-
-    clientItems.push({
-      merchandiseId: item.merchandiseId,
-      quantity: item.quantity,
-      updatedAt: item.updatedAt || now, // Use client timestamp or current time
-      deleted: item.deleted || false,
-    });
+  const clientItemsResult = validateCartItems(body.items, now);
+  if ("error" in clientItemsResult) {
+    return jsonResponse({ error: clientItemsResult.error }, 400);
   }
+  const clientItems = clientItemsResult.items;
 
   const { env } = await getCloudflareContext();
   const cartKey = getCartKey(customerId);
@@ -122,6 +137,51 @@ export async function POST(request: NextRequest) {
 
   let mergedItems: CartItem[];
   let newVersion: number;
+
+  // Handle login merge: guest cart → account cart
+  if (body.isLoginMerge && body.guestCart) {
+    const rawGuestItems = body.guestCart.items || [];
+
+    // Validate guest cart items the same way as client items
+    if (!Array.isArray(rawGuestItems)) {
+      return jsonResponse({ error: "guestCart.items must be an array" }, 400);
+    }
+
+    const guestItemsResult = validateCartItems(rawGuestItems, now);
+    if ("error" in guestItemsResult) {
+      return jsonResponse(
+        { error: `Invalid guest cart: ${guestItemsResult.error}` },
+        400
+      );
+    }
+    const guestItems = guestItemsResult.items;
+
+    if (serverCart && serverCart.items.length > 0) {
+      // Account cart exists - merge guest cart INTO account cart
+      // Union: all unique items, last-write-wins for conflicts
+      mergedItems = mergeCarts({ items: guestItems }, serverCart);
+    } else {
+      // No account cart - guest cart becomes account cart
+      mergedItems = guestItems.filter((it) => !it.deleted && it.quantity > 0);
+    }
+    newVersion = serverVersion + 1;
+
+    const mergedCart: StoredCart = {
+      customerId,
+      items: mergedItems,
+      updatedAt: now,
+      version: newVersion,
+    };
+
+    await env.CARTS_KV.put(cartKey, JSON.stringify(mergedCart));
+
+    return jsonResponse({
+      conflict: false,
+      merged: true,
+      message: "Guest cart merged with account cart",
+      cart: mergedCart,
+    });
+  }
 
   if (body.forceOverwrite) {
     // Force overwrite - no merge, just use client data

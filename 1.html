@@ -1,0 +1,283 @@
+<script>
+    window.CartSync = {
+      API_URL: 'https://composing-the-wild.webflow.io/app',
+      DEBUG: true,
+      STORAGE_KEY: 'cartsync_customer_id',
+      VERSION_KEY: 'cartsync_version',
+      _lastCartHash: null,
+      _syncing: false,
+      _initialized: false,
+    
+      log(...args) {
+        if (this.DEBUG) console.log('%c[CartSync]', 'color: #ff6d2f; font-weight: bold', ...args);
+      },
+    
+      // ===== Storage =====
+      saveCustomerId(id) {
+        if (id) localStorage.setItem(this.STORAGE_KEY, id);
+      },
+      
+      getStoredCustomerId() {
+        return localStorage.getItem(this.STORAGE_KEY);
+      },
+      
+      clearAllData() {
+        this.log('🗑️ Clearing ALL CartSync data');
+        localStorage.removeItem(this.STORAGE_KEY);
+        localStorage.removeItem(this.VERSION_KEY);
+        this._lastCartHash = null;
+      },
+    
+      // ===== ALWAYS get fresh customer ID from Smootify =====
+      async getFreshCustomerId() {
+        // Try from cart's buyerIdentity first
+        try {
+          const cart = await window.Smootify.getCart();
+          if (cart?.buyerIdentity?.customer?.id) {
+            return cart.buyerIdentity.customer.id;
+          }
+        } catch (e) {
+          this.log('getCart error:', e.message);
+        }
+        
+        // Try queryCustomer as fallback
+        try {
+          if (window.Smootify?.queryCustomer) {
+            const resp = await window.Smootify.queryCustomer(`id`);
+            const customer = resp?.customer || resp?.data?.customer || resp;
+            if (customer?.id) return customer.id;
+          }
+        } catch (e) {
+          this.log('queryCustomer error:', e.message);
+        }
+        
+        return null;
+      },
+    
+      // ===== Get fresh ID with retries =====
+      async getFreshCustomerIdWithRetry(maxAttempts = 8) {
+        for (let i = 1; i <= maxAttempts; i++) {
+          this.log(`Getting customer ID... attempt ${i}/${maxAttempts}`);
+          const id = await this.getFreshCustomerId();
+          if (id) return id;
+          if (i < maxAttempts) {
+            await new Promise(r => setTimeout(r, 500 * i));
+          }
+        }
+        return null;
+      },
+    
+      // ===== CRITICAL: Check if customer changed =====
+      async checkCustomerAndClearIfChanged() {
+        const freshId = await this.getFreshCustomerId();
+        const storedId = this.getStoredCustomerId();
+        
+        this.log('Fresh ID:', freshId, '| Stored ID:', storedId);
+        
+        // No customer logged in
+        if (!freshId) {
+          if (storedId) {
+            this.log('⚠️ User logged out - clearing data');
+            this.clearAllData();
+          }
+          return null;
+        }
+        
+        // Customer changed!
+        if (storedId && storedId !== freshId) {
+          this.log('🔄 CUSTOMER CHANGED! Clearing old data');
+          this.log('   Old:', storedId);
+          this.log('   New:', freshId);
+          this.clearAllData();
+        }
+        
+        // Save current customer
+        this.saveCustomerId(freshId);
+        return freshId;
+      },
+    
+      // ===== Cart helpers =====
+      formatCartItems(cart) {
+        if (!cart?.lines?.nodes) return [];
+        return cart.lines.nodes
+          .filter(n => n.merchandise?.id)
+          .map(n => ({
+            merchandiseId: n.merchandise.id,
+            quantity: n.quantity,
+            updatedAt: new Date().toISOString(),
+          }));
+      },
+    
+      async fetchKVCart(customerId) {
+        try {
+          const res = await fetch(`${this.API_URL}/api/cart`, {
+            headers: { 'x-customer-id-master-zero': customerId }
+          });
+          if (!res.ok) return null;
+          return await res.json();
+        } catch (e) {
+          this.log('KV fetch error:', e);
+          return null;
+        }
+      },
+    
+      async syncToKV(customerId, items, version = 0) {
+        try {
+          const res = await fetch(`${this.API_URL}/api/cart/sync`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-customer-id-master-zero': customerId
+            },
+            body: JSON.stringify({ items, version })
+          });
+          if (!res.ok) return null;
+          const data = await res.json();
+          if (data.cart?.version) {
+            localStorage.setItem(this.VERSION_KEY, String(data.cart.version));
+          }
+          return data;
+        } catch (e) {
+          this.log('KV sync error:', e);
+          return null;
+        }
+      },
+    
+      mergeItems(local, server) {
+        const map = new Map();
+        for (const item of server || []) map.set(item.merchandiseId, { ...item });
+        for (const item of local || []) {
+          const existing = map.get(item.merchandiseId);
+          if (!existing) {
+            map.set(item.merchandiseId, { ...item });
+          } else {
+            const lt = new Date(item.updatedAt || 0).getTime();
+            const st = new Date(existing.updatedAt || 0).getTime();
+            if (lt > st) map.set(item.merchandiseId, { ...item });
+          }
+        }
+        return Array.from(map.values()).filter(it => it.quantity > 0);
+      },
+    
+      // ===== Sync current cart (polling) =====
+      async syncCurrentCart() {
+        if (this._syncing) return;
+        this._syncing = true;
+        
+        try {
+          // ALWAYS check if customer changed first
+          const customerId = await this.checkCustomerAndClearIfChanged();
+          if (!customerId) return;
+          
+          const cart = await window.Smootify.getCart();
+          if (!cart) return;
+          
+          const items = this.formatCartItems(cart);
+          const hash = JSON.stringify(items);
+          
+          if (hash === this._lastCartHash) return;
+          this._lastCartHash = hash;
+          
+          const version = parseInt(localStorage.getItem(this.VERSION_KEY) || '0', 10);
+          this.log('Syncing to KV:', items.length, 'items');
+          await this.syncToKV(customerId, items, version);
+        } finally {
+          this._syncing = false;
+        }
+      },
+    
+      // ===== Initial sync on page load =====
+      async initialSync() {
+        // Clear any stale data first, then get fresh customer
+        const customerId = await this.checkCustomerAndClearIfChanged();
+        
+        if (!customerId) {
+          // Retry a few times
+          const retryId = await this.getFreshCustomerIdWithRetry(8);
+          if (!retryId) {
+            this.log('❌ No customer found - not logged in');
+            return;
+          }
+          this.saveCustomerId(retryId);
+          return this.initialSync(); // Restart with new ID
+        }
+        
+        this.log('✅ Customer:', customerId);
+        
+        const kvCart = await this.fetchKVCart(customerId);
+        const browserCart = await window.Smootify.getCart();
+        
+        const kvItems = kvCart?.items || [];
+        const browserItems = this.formatCartItems(browserCart);
+        
+        this.log('KV:', kvItems.length, 'items | Browser:', browserItems.length, 'items');
+        
+        // Both empty
+        if (!kvItems.length && !browserItems.length) {
+          this.log('Both empty - done');
+          return;
+        }
+        
+        // KV empty, browser has items
+        if (!kvItems.length && browserItems.length) {
+          this.log('→ Syncing browser to KV');
+          await this.syncToKV(customerId, browserItems, 0);
+          return;
+        }
+        
+        // Browser empty, KV has items
+        if (!browserItems.length && kvItems.length) {
+          this.log('→ Restoring from KV');
+          for (const item of kvItems) {
+            try {
+              await window.Smootify.addToCart([{ merchandiseId: item.merchandiseId, quantity: item.quantity }]);
+            } catch (e) { this.log('Add error:', e); }
+          }
+          return;
+        }
+        
+        // Both have items - merge
+        this.log('→ Merging carts');
+        const merged = this.mergeItems(browserItems, kvItems);
+        
+        await window.Smootify.clearCart();
+        for (const item of merged) {
+          try {
+            await window.Smootify.addToCart([{ merchandiseId: item.merchandiseId, quantity: item.quantity }]);
+          } catch (e) { this.log('Merge add error:', e); }
+        }
+        
+        await new Promise(r => setTimeout(r, 500));
+        await this.syncCurrentCart();
+      },
+    
+      // ===== Init =====
+      async init() {
+        if (this._initialized) return;
+        this._initialized = true;
+        
+        this.log('Waiting for Smootify...');
+        
+        let attempts = 0;
+        while (!window.Smootify?.getCart && attempts < 100) {
+          await new Promise(r => setTimeout(r, 100));
+          attempts++;
+        }
+        
+        if (!window.Smootify?.getCart) {
+          this.log('Smootify not found');
+          return;
+        }
+        
+        this.log('Smootify ready - waiting for data...');
+        await new Promise(r => setTimeout(r, 3000));
+        
+        await this.initialSync();
+        
+        // Poll every 5s - ALWAYS checks customer first
+        setInterval(() => this.syncCurrentCart(), 5000);
+      }
+    };
+    
+    CartSync.init();
+    </script>

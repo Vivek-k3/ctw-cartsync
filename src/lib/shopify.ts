@@ -15,10 +15,16 @@ export interface CartItem {
 }
 
 export interface StoredCart {
-  customerId: string; // gid://shopify/Customer/xxx
+  customerId: string; // gid://shopify/Customer/xxx or "guest"
   items: CartItem[];
   updatedAt: string; // ISO datetime - last change to any item
   version: number; // for optimistic concurrency
+}
+
+// Guest cart structure (sent from client on login)
+export interface GuestCart {
+  items: CartItem[];
+  deviceId?: string; // optional device identifier
 }
 
 export interface ShopifyConfig {

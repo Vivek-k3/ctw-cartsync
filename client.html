@@ -1,0 +1,577 @@
+<!--
+  CartSync Client Script
+  
+  Mental Model:
+  1. Guest Cart (Device Cart) - localStorage when not logged in
+  2. Account Cart (Server Cart) - KV store when logged in
+  3. Merge Logic - when guest logs in, merge device cart with account cart
+  
+  Behavior:
+  - Logged out: all cart ops go to localStorage
+  - Logged in: all cart ops sync to server, real-time across devices
+  - On login: guest cart merges with account cart (union, last-write-wins)
+  - On logout: account cart stays on server, device falls back to empty guest cart
+-->
+
+<script>
+window.CartSync = (function() {
+  // ========== CONFIG ==========
+  const CONFIG = {
+    API_URL: 'https://composing-the-wild.webflow.io/app',
+    DEBUG: true,
+    GUEST_CART_KEY: 'cartsync_guest_cart',
+    CUSTOMER_ID_KEY: 'cartsync_customer_id',
+    VERSION_KEY: 'cartsync_version',
+    SYNC_INTERVAL: 5000, // 5 seconds
+    MERGE_FLAG_KEY: 'cartsync_needs_merge',
+  };
+
+  // ========== STATE ==========
+  let _state = {
+    customerId: null,
+    isLoggedIn: false,
+    lastCartHash: null,
+    syncing: false,
+    initialized: false,
+    syncInterval: null,
+  };
+
+  // ========== UTILS ==========
+  function log(...args) {
+    if (CONFIG.DEBUG) {
+      console.log('%c[CartSync]', 'color: #ff6d2f; font-weight: bold', ...args);
+    }
+  }
+
+  function now() {
+    return new Date().toISOString();
+  }
+
+  function hashCart(items) {
+    return JSON.stringify(items.map(i => `${i.merchandiseId}:${i.quantity}`).sort());
+  }
+
+  // ========== GUEST CART (localStorage) ==========
+  const GuestCart = {
+    get() {
+      try {
+        const data = localStorage.getItem(CONFIG.GUEST_CART_KEY);
+        if (!data) return { items: [], version: 0, updatedAt: null };
+        return JSON.parse(data);
+      } catch {
+        return { items: [], version: 0, updatedAt: null };
+      }
+    },
+
+    save(cart) {
+      localStorage.setItem(CONFIG.GUEST_CART_KEY, JSON.stringify({
+        items: cart.items || [],
+        version: (cart.version || 0) + 1,
+        updatedAt: now(),
+      }));
+    },
+
+    clear() {
+      localStorage.removeItem(CONFIG.GUEST_CART_KEY);
+      log('🗑️ Guest cart cleared');
+    },
+
+    addItem(merchandiseId, quantity = 1) {
+      const cart = this.get();
+      const existing = cart.items.find(i => i.merchandiseId === merchandiseId);
+      
+      if (existing) {
+        existing.quantity += quantity;
+        existing.updatedAt = now();
+      } else {
+        cart.items.push({
+          merchandiseId,
+          quantity,
+          updatedAt: now(),
+        });
+      }
+      
+      this.save(cart);
+      log('➕ Guest cart: added', merchandiseId, 'qty:', quantity);
+      return cart;
+    },
+
+    updateItem(merchandiseId, quantity) {
+      const cart = this.get();
+      const existing = cart.items.find(i => i.merchandiseId === merchandiseId);
+      
+      if (existing) {
+        if (quantity <= 0) {
+          cart.items = cart.items.filter(i => i.merchandiseId !== merchandiseId);
+        } else {
+          existing.quantity = quantity;
+          existing.updatedAt = now();
+        }
+        this.save(cart);
+      }
+      
+      log('✏️ Guest cart: updated', merchandiseId, 'to qty:', quantity);
+      return cart;
+    },
+
+    removeItem(merchandiseId) {
+      const cart = this.get();
+      cart.items = cart.items.filter(i => i.merchandiseId !== merchandiseId);
+      this.save(cart);
+      log('➖ Guest cart: removed', merchandiseId);
+      return cart;
+    },
+
+    hasItems() {
+      return this.get().items.length > 0;
+    },
+  };
+
+  // ========== SERVER CART API ==========
+  const ServerCart = {
+    async fetch(customerId) {
+      try {
+        const res = await fetch(`${CONFIG.API_URL}/api/cart`, {
+          headers: { 'x-customer-id-master-zero': customerId },
+        });
+        if (!res.ok) return null;
+        return await res.json();
+      } catch (e) {
+        log('❌ Server fetch error:', e);
+        return null;
+      }
+    },
+
+    async sync(customerId, items, version = 0, options = {}) {
+      try {
+        const body = {
+          items,
+          version,
+          ...options,
+        };
+
+        const res = await fetch(`${CONFIG.API_URL}/api/cart/sync`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-customer-id-master-zero': customerId,
+          },
+          body: JSON.stringify(body),
+        });
+
+        if (!res.ok) {
+          log('❌ Server sync error:', res.status);
+          return null;
+        }
+
+        const data = await res.json();
+        
+        if (data.cart?.version) {
+          localStorage.setItem(CONFIG.VERSION_KEY, String(data.cart.version));
+        }
+
+        return data;
+      } catch (e) {
+        log('❌ Server sync error:', e);
+        return null;
+      }
+    },
+
+    async mergeGuestCart(customerId, guestCart) {
+      return this.sync(customerId, [], 0, {
+        isLoginMerge: true,
+        guestCart: { items: guestCart.items },
+      });
+    },
+  };
+
+  // ========== MERGE LOGIC ==========
+  function mergeItems(localItems, serverItems) {
+    const map = new Map();
+
+    // Start with server items
+    for (const item of serverItems || []) {
+      map.set(item.merchandiseId, { ...item });
+    }
+
+    // Merge local items (last-write-wins)
+    for (const item of localItems || []) {
+      const existing = map.get(item.merchandiseId);
+      
+      if (!existing) {
+        map.set(item.merchandiseId, { ...item });
+      } else {
+        const localTime = new Date(item.updatedAt || 0).getTime();
+        const serverTime = new Date(existing.updatedAt || 0).getTime();
+        
+        if (localTime > serverTime) {
+          map.set(item.merchandiseId, { ...item });
+        }
+      }
+    }
+
+    return Array.from(map.values()).filter(it => it.quantity > 0);
+  }
+
+  // ========== SMOOTIFY INTEGRATION ==========
+  const Smootify = {
+    async isReady() {
+      let attempts = 0;
+      while (!window.Smootify?.getCart && attempts < 100) {
+        await new Promise(r => setTimeout(r, 100));
+        attempts++;
+      }
+      return !!window.Smootify?.getCart;
+    },
+
+    async getCart() {
+      try {
+        return await window.Smootify.getCart();
+      } catch {
+        return null;
+      }
+    },
+
+    async getCustomerId() {
+      // Try from cart's buyerIdentity first
+      try {
+        const cart = await this.getCart();
+        if (cart?.buyerIdentity?.customer?.id) {
+          return cart.buyerIdentity.customer.id;
+        }
+      } catch {}
+
+      // Try queryCustomer as fallback
+      try {
+        if (window.Smootify?.queryCustomer) {
+          const resp = await window.Smootify.queryCustomer('id');
+          const customer = resp?.customer || resp?.data?.customer || resp;
+          if (customer?.id) return customer.id;
+        }
+      } catch {}
+
+      return null;
+    },
+
+    formatCartItems(cart) {
+      if (!cart?.lines?.nodes) return [];
+      return cart.lines.nodes
+        .filter(n => n.merchandise?.id)
+        .map(n => ({
+          merchandiseId: n.merchandise.id,
+          quantity: n.quantity,
+          updatedAt: now(),
+        }));
+    },
+
+    async clearCart() {
+      try {
+        await window.Smootify.clearCart();
+      } catch (e) {
+        log('Clear cart error:', e);
+      }
+    },
+
+    async addItems(items) {
+      for (const item of items) {
+        try {
+          await window.Smootify.addToCart([{
+            merchandiseId: item.merchandiseId,
+            quantity: item.quantity,
+          }]);
+        } catch (e) {
+          log('Add item error:', e);
+        }
+      }
+    },
+  };
+
+  // ========== MAIN SYNC LOGIC ==========
+  
+  // Check login state and handle transitions
+  async function checkAuthState() {
+    const freshCustomerId = await Smootify.getCustomerId();
+    const storedCustomerId = localStorage.getItem(CONFIG.CUSTOMER_ID_KEY);
+
+    log('Auth check - Fresh:', freshCustomerId, '| Stored:', storedCustomerId);
+
+    // Case 1: Not logged in
+    if (!freshCustomerId) {
+      if (storedCustomerId) {
+        // User logged out - clear account data, keep guest cart empty
+        log('👋 User logged out');
+        localStorage.removeItem(CONFIG.CUSTOMER_ID_KEY);
+        localStorage.removeItem(CONFIG.VERSION_KEY);
+      }
+      _state.isLoggedIn = false;
+      _state.customerId = null;
+      return { isLoggedIn: false, customerId: null };
+    }
+
+    // Case 2: Logged in
+    _state.customerId = freshCustomerId;
+    _state.isLoggedIn = true;
+
+    // Case 2a: Same customer - continue
+    if (storedCustomerId === freshCustomerId) {
+      return { isLoggedIn: true, customerId: freshCustomerId, changed: false };
+    }
+
+    // Case 2b: Different customer or first login
+    if (storedCustomerId && storedCustomerId !== freshCustomerId) {
+      log('🔄 Customer changed from', storedCustomerId, 'to', freshCustomerId);
+    } else {
+      log('🔐 User logged in:', freshCustomerId);
+    }
+
+    // Save new customer ID
+    localStorage.setItem(CONFIG.CUSTOMER_ID_KEY, freshCustomerId);
+    localStorage.removeItem(CONFIG.VERSION_KEY);
+
+    // Check if we need to merge guest cart
+    const guestCart = GuestCart.get();
+    if (guestCart.items.length > 0) {
+      log('📦 Guest cart has items - will merge on sync');
+      return { isLoggedIn: true, customerId: freshCustomerId, needsMerge: true, guestCart };
+    }
+
+    return { isLoggedIn: true, customerId: freshCustomerId, changed: true };
+  }
+
+  // Initial sync on page load
+  async function initialSync() {
+    const authState = await checkAuthState();
+
+    if (!authState.isLoggedIn) {
+      log('👤 Guest mode - using local cart');
+      // Optionally restore guest cart to Smootify UI
+      const guestCart = GuestCart.get();
+      if (guestCart.items.length > 0) {
+        log('📦 Guest cart has', guestCart.items.length, 'items');
+      }
+      return;
+    }
+
+    log('✅ Logged in as:', authState.customerId);
+
+    // Handle guest cart merge on login
+    if (authState.needsMerge && authState.guestCart) {
+      log('🔀 Merging guest cart with account cart...');
+      
+      const result = await ServerCart.mergeGuestCart(
+        authState.customerId,
+        authState.guestCart
+      );
+
+      if (result?.cart) {
+        log('✅ Merge complete -', result.cart.items.length, 'items');
+        
+        // Clear guest cart after successful merge
+        GuestCart.clear();
+        
+        // Update Smootify UI with merged cart
+        await Smootify.clearCart();
+        await Smootify.addItems(result.cart.items);
+        
+        return;
+      }
+    }
+
+    // Normal sync: fetch server cart and reconcile with browser
+    const serverCart = await ServerCart.fetch(authState.customerId);
+    const browserCart = await Smootify.getCart();
+    
+    const serverItems = serverCart?.items || [];
+    const browserItems = Smootify.formatCartItems(browserCart);
+
+    log('Server:', serverItems.length, 'items | Browser:', browserItems.length, 'items');
+
+    // Both empty - nothing to do
+    if (!serverItems.length && !browserItems.length) {
+      log('Both carts empty');
+      return;
+    }
+
+    // Server empty, browser has items - sync browser to server
+    if (!serverItems.length && browserItems.length) {
+      log('→ Syncing browser cart to server');
+      await ServerCart.sync(authState.customerId, browserItems, 0);
+      return;
+    }
+
+    // Browser empty, server has items - restore from server
+    if (!browserItems.length && serverItems.length) {
+      log('→ Restoring cart from server');
+      await Smootify.addItems(serverItems);
+      return;
+    }
+
+    // Both have items - merge (last-write-wins)
+    log('→ Merging carts');
+    const merged = mergeItems(browserItems, serverItems);
+    
+    await Smootify.clearCart();
+    await Smootify.addItems(merged);
+    
+    const version = parseInt(localStorage.getItem(CONFIG.VERSION_KEY) || '0', 10);
+    await ServerCart.sync(authState.customerId, merged, version);
+  }
+
+  // Periodic sync (polling)
+  async function syncCurrentCart() {
+    if (_state.syncing) return;
+    _state.syncing = true;
+
+    try {
+      // Re-check auth state (handles logout/login)
+      const authState = await checkAuthState();
+
+      if (!authState.isLoggedIn) {
+        // Guest mode - no server sync needed
+        return;
+      }
+
+      // Handle login merge if needed
+      if (authState.needsMerge && authState.guestCart) {
+        await initialSync(); // Full sync with merge
+        return;
+      }
+
+      const cart = await Smootify.getCart();
+      if (!cart) return;
+
+      const items = Smootify.formatCartItems(cart);
+      const hash = hashCart(items);
+
+      // Skip if cart unchanged
+      if (hash === _state.lastCartHash) return;
+      _state.lastCartHash = hash;
+
+      const version = parseInt(localStorage.getItem(CONFIG.VERSION_KEY) || '0', 10);
+      log('📤 Syncing', items.length, 'items to server');
+      
+      const result = await ServerCart.sync(authState.customerId, items, version);
+
+      // Handle conflict (server had changes from another device)
+      if (result?.conflict) {
+        log('⚠️ Conflict detected - applying merged cart');
+        await Smootify.clearCart();
+        await Smootify.addItems(result.cart.items);
+        _state.lastCartHash = hashCart(result.cart.items);
+      }
+    } finally {
+      _state.syncing = false;
+    }
+  }
+
+  // ========== PUBLIC API ==========
+  const publicAPI = {
+    // Config
+    setApiUrl(url) {
+      CONFIG.API_URL = url;
+    },
+
+    setDebug(enabled) {
+      CONFIG.DEBUG = enabled;
+    },
+
+    // Manual cart operations (for non-Smootify usage)
+    addToCart(merchandiseId, quantity = 1) {
+      if (_state.isLoggedIn) {
+        // Logged in - let Smootify handle it, sync will pick it up
+        log('➕ Add to cart (logged in):', merchandiseId);
+        return;
+      }
+      
+      // Guest mode - add to local cart
+      GuestCart.addItem(merchandiseId, quantity);
+    },
+
+    updateCartItem(merchandiseId, quantity) {
+      if (_state.isLoggedIn) {
+        log('✏️ Update cart item (logged in):', merchandiseId, quantity);
+        return;
+      }
+      
+      GuestCart.updateItem(merchandiseId, quantity);
+    },
+
+    removeFromCart(merchandiseId) {
+      if (_state.isLoggedIn) {
+        log('➖ Remove from cart (logged in):', merchandiseId);
+        return;
+      }
+      
+      GuestCart.removeItem(merchandiseId);
+    },
+
+    // Get current cart (guest or account)
+    async getCart() {
+      if (_state.isLoggedIn && _state.customerId) {
+        const serverCart = await ServerCart.fetch(_state.customerId);
+        return serverCart?.items || [];
+      }
+      return GuestCart.get().items;
+    },
+
+    // Force sync
+    async sync() {
+      await syncCurrentCart();
+    },
+
+    // Force re-fetch from server
+    async refresh() {
+      await initialSync();
+    },
+
+    // Get state
+    getState() {
+      return {
+        isLoggedIn: _state.isLoggedIn,
+        customerId: _state.customerId,
+        hasGuestCart: GuestCart.hasItems(),
+      };
+    },
+
+    // Clear all data (for testing)
+    clearAllData() {
+      GuestCart.clear();
+      localStorage.removeItem(CONFIG.CUSTOMER_ID_KEY);
+      localStorage.removeItem(CONFIG.VERSION_KEY);
+      _state.lastCartHash = null;
+      log('🗑️ All CartSync data cleared');
+    },
+
+    // Initialize
+    async init() {
+      if (_state.initialized) return;
+      _state.initialized = true;
+
+      log('🚀 Initializing...');
+
+      // Wait for Smootify
+      const ready = await Smootify.isReady();
+      if (!ready) {
+        log('⚠️ Smootify not found - running in standalone mode');
+      } else {
+        log('✅ Smootify ready');
+        // Wait for Smootify to load data
+        await new Promise(r => setTimeout(r, 2000));
+      }
+
+      // Initial sync
+      await initialSync();
+
+      // Start polling
+      _state.syncInterval = setInterval(() => syncCurrentCart(), CONFIG.SYNC_INTERVAL);
+
+      log('✅ CartSync initialized');
+    },
+  };
+
+  return publicAPI;
+})();
+
+// Auto-init
+CartSync.init();
+</script>
