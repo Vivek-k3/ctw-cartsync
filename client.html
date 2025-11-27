@@ -51,6 +51,50 @@ window.CartSync = (function() {
     return JSON.stringify(items.map(i => `${i.merchandiseId}:${i.quantity}`).sort());
   }
 
+  // Check if two carts are equivalent (same items, same quantities)
+  function cartsAreEqual(itemsA, itemsB) {
+    if (itemsA.length !== itemsB.length) return false;
+    
+    const mapA = new Map(itemsA.map(i => [i.merchandiseId, i.quantity]));
+    
+    for (const item of itemsB) {
+      if (mapA.get(item.merchandiseId) !== item.quantity) {
+        return false;
+      }
+    }
+    
+    return true;
+  }
+
+  // Compute diff between browser cart and target cart
+  function computeCartDiff(browserItems, targetItems) {
+    const browserMap = new Map(browserItems.map(i => [i.merchandiseId, i.quantity]));
+    const targetMap = new Map(targetItems.map(i => [i.merchandiseId, i.quantity]));
+    
+    const toAdd = [];      // Items in target but not in browser
+    const toRemove = [];   // Items in browser but not in target
+    const toUpdate = [];   // Items in both but different quantity
+    
+    // Find items to add or update
+    for (const [id, qty] of targetMap) {
+      const browserQty = browserMap.get(id);
+      if (browserQty === undefined) {
+        toAdd.push({ merchandiseId: id, quantity: qty });
+      } else if (browserQty !== qty) {
+        toUpdate.push({ merchandiseId: id, quantity: qty, oldQuantity: browserQty });
+      }
+    }
+    
+    // Find items to remove
+    for (const [id] of browserMap) {
+      if (!targetMap.has(id)) {
+        toRemove.push({ merchandiseId: id });
+      }
+    }
+    
+    return { toAdd, toRemove, toUpdate, hasChanges: toAdd.length > 0 || toRemove.length > 0 || toUpdate.length > 0 };
+  }
+
   // ========== GUEST CART (localStorage) ==========
   const GuestCart = {
     get() {
@@ -284,6 +328,56 @@ window.CartSync = (function() {
         }
       }
     },
+
+    async removeItem(merchandiseId) {
+      try {
+        // Smootify uses line IDs, need to find the line first
+        const cart = await this.getCart();
+        const line = cart?.lines?.nodes?.find(n => n.merchandise?.id === merchandiseId);
+        if (line?.id && window.Smootify.removeFromCart) {
+          await window.Smootify.removeFromCart([line.id]);
+        }
+      } catch (e) {
+        log('Remove item error:', e);
+      }
+    },
+
+    async updateItemQuantity(merchandiseId, quantity) {
+      try {
+        const cart = await this.getCart();
+        const line = cart?.lines?.nodes?.find(n => n.merchandise?.id === merchandiseId);
+        if (line?.id && window.Smootify.updateCart) {
+          await window.Smootify.updateCart([{ id: line.id, quantity }]);
+        }
+      } catch (e) {
+        log('Update quantity error:', e);
+      }
+    },
+
+    // Apply diff incrementally instead of clear+add all
+    async applyDiff(diff) {
+      // Remove items first
+      for (const item of diff.toRemove) {
+        await this.removeItem(item.merchandiseId);
+      }
+      
+      // Update quantities
+      for (const item of diff.toUpdate) {
+        await this.updateItemQuantity(item.merchandiseId, item.quantity);
+      }
+      
+      // Add new items
+      for (const item of diff.toAdd) {
+        try {
+          await window.Smootify.addToCart([{
+            merchandiseId: item.merchandiseId,
+            quantity: item.quantity,
+          }]);
+        } catch (e) {
+          log('Add item error:', e);
+        }
+      }
+    },
   };
 
   // ========== MAIN SYNC LOGIC ==========
@@ -369,9 +463,17 @@ window.CartSync = (function() {
         // Clear guest cart after successful merge
         GuestCart.clear();
         
-        // Update Smootify UI with merged cart
-        await Smootify.clearCart();
-        await Smootify.addItems(result.cart.items);
+        // Get current browser cart and apply diff
+        const browserCart = await Smootify.getCart();
+        const browserItems = Smootify.formatCartItems(browserCart);
+        const diff = computeCartDiff(browserItems, result.cart.items);
+        
+        if (diff.hasChanges) {
+          log('→ Applying merge diff:', diff.toAdd.length, 'add,', diff.toRemove.length, 'remove,', diff.toUpdate.length, 'update');
+          await Smootify.applyDiff(diff);
+        } else {
+          log('→ Carts already in sync after merge');
+        }
         
         return;
       }
@@ -392,29 +494,40 @@ window.CartSync = (function() {
       return;
     }
 
-    // Server empty, browser has items - sync browser to server
+    // Check if carts are already in sync
+    if (cartsAreEqual(browserItems, serverItems)) {
+      log('✓ Carts already in sync');
+      _state.lastCartHash = hashCart(browserItems);
+      return;
+    }
+
+    // For logged-in users who were ALREADY logged in (not a fresh login),
+    // SERVER IS AUTHORITATIVE. This matches Amazon's model:
+    // "The source of truth is always the server; UI must re-sync before critical actions."
+    //
+    // We only "merge" (union) when:
+    // 1. Guest cart merge on login (handled above)
+    // 2. Server is empty and browser has items (first device to add items)
+    
+    // Server empty, browser has items - sync browser to server (first device scenario)
     if (!serverItems.length && browserItems.length) {
-      log('→ Syncing browser cart to server');
+      log('→ Server empty - syncing browser cart to server');
       await ServerCart.sync(authState.customerId, browserItems, 0);
+      _state.lastCartHash = hashCart(browserItems);
       return;
     }
 
-    // Browser empty, server has items - restore from server
-    if (!browserItems.length && serverItems.length) {
-      log('→ Restoring cart from server');
-      await Smootify.addItems(serverItems);
-      return;
+    // Server has items - SERVER IS AUTHORITATIVE
+    // Update browser to match server (this handles items added/removed on other devices)
+    log('→ Server is authoritative - syncing browser to server state');
+    const diff = computeCartDiff(browserItems, serverItems);
+    
+    if (diff.hasChanges) {
+      log('→ Applying diff:', diff.toAdd.length, 'add,', diff.toRemove.length, 'remove,', diff.toUpdate.length, 'update');
+      await Smootify.applyDiff(diff);
     }
-
-    // Both have items - merge (last-write-wins)
-    log('→ Merging carts');
-    const merged = mergeItems(browserItems, serverItems);
     
-    await Smootify.clearCart();
-    await Smootify.addItems(merged);
-    
-    const version = parseInt(localStorage.getItem(CONFIG.VERSION_KEY) || '0', 10);
-    await ServerCart.sync(authState.customerId, merged, version);
+    _state.lastCartHash = hashCart(serverItems);
   }
 
   // Periodic sync (polling)
@@ -455,8 +568,17 @@ window.CartSync = (function() {
       // Handle conflict (server had changes from another device)
       if (result?.conflict) {
         log('⚠️ Conflict detected - applying merged cart');
-        await Smootify.clearCart();
-        await Smootify.addItems(result.cart.items);
+        
+        // Get current browser state and apply diff
+        const currentCart = await Smootify.getCart();
+        const currentItems = Smootify.formatCartItems(currentCart);
+        const diff = computeCartDiff(currentItems, result.cart.items);
+        
+        if (diff.hasChanges) {
+          log('→ Applying conflict diff:', diff.toAdd.length, 'add,', diff.toRemove.length, 'remove,', diff.toUpdate.length, 'update');
+          await Smootify.applyDiff(diff);
+        }
+        
         _state.lastCartHash = hashCart(result.cart.items);
       }
     } finally {
