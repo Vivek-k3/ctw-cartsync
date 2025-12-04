@@ -32,37 +32,160 @@ export interface ShopifyConfig {
   storefrontAccessToken: string;
 }
 
+export interface ShopifyAdminConfig {
+  storeDomain: string;
+  adminAccessToken: string; // shpat_xxx
+}
+
+type ShopifyGraphQLError = { message: string; extensions?: Record<string, unknown> };
+
+interface ShopifyGraphQLResponse<T> {
+  data?: T;
+  errors?: ShopifyGraphQLError[];
+}
+
+export class ShopifyError extends Error {
+  readonly status: number;
+  readonly errors?: ShopifyGraphQLError[];
+  // Raw response body (best‑effort) for debugging
+  readonly responseBody?: unknown;
+
+  constructor(
+    message: string,
+    options: {
+      status?: number;
+      errors?: ShopifyGraphQLError[];
+      responseBody?: unknown;
+      cause?: unknown;
+    } = {}
+  ) {
+    super(message);
+    this.name = "ShopifyError";
+    this.status = options.status ?? 500;
+    this.errors = options.errors;
+    this.responseBody = options.responseBody;
+
+    if (options.cause) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (this as any).cause = options.cause;
+    }
+  }
+}
+
+async function shopifyGraphQLFetch<T>(
+  url: string,
+  headers: Record<string, string>,
+  query: string,
+  variables: Record<string, unknown>,
+  apiName: string
+): Promise<T> {
+  let response: Response;
+
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify({ query, variables }),
+    });
+  } catch (err) {
+    throw new ShopifyError(`Failed to reach Shopify ${apiName}`, {
+      status: 502,
+      cause: err,
+    });
+  }
+
+  let rawBody: string | undefined;
+
+  try {
+    rawBody = await response.text();
+  } catch (err) {
+    throw new ShopifyError(`Failed to read Shopify ${apiName} response body`, {
+      status: response.status || 502,
+      cause: err,
+    });
+  }
+
+  let json: ShopifyGraphQLResponse<T> = {};
+
+  try {
+    json = rawBody ? (JSON.parse(rawBody) as ShopifyGraphQLResponse<T>) : {};
+  } catch {
+    throw new ShopifyError(`Invalid JSON from Shopify ${apiName}`, {
+      status: response.status || 502,
+      responseBody: rawBody,
+    });
+  }
+
+  if (!response.ok) {
+    throw new ShopifyError(`Shopify ${apiName} error: ${response.status}`, {
+      status: response.status,
+      errors: json.errors,
+      responseBody: Object.keys(json).length ? json : rawBody,
+    });
+  }
+
+  if (json.errors && json.errors.length > 0) {
+    throw new ShopifyError(
+      json.errors.map((e: ShopifyGraphQLError) => e.message).join(", ") ||
+        `Shopify ${apiName} GraphQL error`,
+      {
+        status: response.status || 502,
+        errors: json.errors,
+        responseBody: json,
+      }
+    );
+  }
+
+  if (!json.data) {
+    throw new ShopifyError(`Shopify ${apiName} response missing data`, {
+      status: response.status || 502,
+      responseBody: json,
+    });
+  }
+
+  return json.data;
+}
+
 export async function shopifyStorefrontFetch<T>(
   config: ShopifyConfig,
   query: string,
   variables: Record<string, unknown> = {}
 ): Promise<T> {
-  const response = await fetch(
+  if (!config.storeDomain || !config.storefrontAccessToken) {
+    throw new ShopifyError("Missing Shopify Storefront configuration", {
+      status: 500,
+    });
+  }
+
+  return shopifyGraphQLFetch<T>(
     `https://${config.storeDomain}/api/${SHOPIFY_STOREFRONT_API_VERSION}/graphql.json`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Storefront-Access-Token": config.storefrontAccessToken,
-      },
-      body: JSON.stringify({ query, variables }),
-    }
+    { "X-Shopify-Storefront-Access-Token": config.storefrontAccessToken },
+    query,
+    variables,
+    "Storefront API"
   );
+}
 
-  if (!response.ok) {
-    throw new Error(`Shopify API error: ${response.status}`);
+const SHOPIFY_ADMIN_API_VERSION = "2024-01";
+
+export async function shopifyAdminFetch<T>(
+  config: ShopifyAdminConfig,
+  query: string,
+  variables: Record<string, unknown> = {}
+): Promise<T> {
+  if (!config.storeDomain || !config.adminAccessToken) {
+    throw new ShopifyError("Missing Shopify Admin configuration", {
+      status: 500,
+    });
   }
 
-  const json = (await response.json()) as {
-    data?: T;
-    errors?: Array<{ message: string }>;
-  };
-
-  if (json.errors) {
-    throw new Error(json.errors.map((e) => e.message).join(", "));
-  }
-
-  return json.data as T;
+  return shopifyGraphQLFetch<T>(
+    `https://${config.storeDomain}/admin/api/${SHOPIFY_ADMIN_API_VERSION}/graphql.json`,
+    { "X-Shopify-Access-Token": config.adminAccessToken },
+    query,
+    variables,
+    "Admin API"
+  );
 }
 
 // Validate customer access token and get customer info

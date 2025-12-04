@@ -42,12 +42,12 @@ interface SyncCartBody {
   isLoginMerge?: boolean; // Flag indicating this is a login merge operation
 }
 
-// Validate and normalize cart items - returns validated items or error string
+// Validate cart items - returns validated items or error string
+// Note: updatedAt is optional - server will assign timestamps based on actual changes
 function validateCartItems(
-  items: unknown[],
-  now: string
-): { items: CartItem[] } | { error: string } {
-  const validated: CartItem[] = [];
+  items: unknown[]
+): { items: Array<{ merchandiseId: string; quantity: number; updatedAt?: string; deleted?: boolean }> } | { error: string } {
+  const validated: Array<{ merchandiseId: string; quantity: number; updatedAt?: string; deleted?: boolean }> = [];
 
   for (const item of items) {
     const i = item as Record<string, unknown>;
@@ -66,12 +66,59 @@ function validateCartItems(
     validated.push({
       merchandiseId: i.merchandiseId,
       quantity: i.quantity,
-      updatedAt: (i.updatedAt as string) || now,
+      updatedAt: i.updatedAt as string | undefined,
       deleted: (i.deleted as boolean) || false,
     });
   }
 
   return { items: validated };
+}
+
+// Apply timestamps based on actual changes (last action wins)
+// - New items get current timestamp
+// - Changed items (quantity different) get current timestamp
+// - Unchanged items keep their existing server timestamp
+function applyTimestamps(
+  clientItems: Array<{ merchandiseId: string; quantity: number; updatedAt?: string; deleted?: boolean }>,
+  serverItems: CartItem[] | undefined,
+  now: string
+): CartItem[] {
+  const serverMap = new Map<string, CartItem>();
+  for (const item of serverItems || []) {
+    serverMap.set(item.merchandiseId, item);
+  }
+
+  return clientItems.map((clientItem) => {
+    const serverItem = serverMap.get(clientItem.merchandiseId);
+
+    // If client provided a timestamp (e.g., guest cart items), use it
+    if (clientItem.updatedAt) {
+      return {
+        merchandiseId: clientItem.merchandiseId,
+        quantity: clientItem.quantity,
+        updatedAt: clientItem.updatedAt,
+        deleted: clientItem.deleted || false,
+      };
+    }
+
+    // New item or quantity changed → use server's current time (this is the "action" time)
+    if (!serverItem || serverItem.quantity !== clientItem.quantity) {
+      return {
+        merchandiseId: clientItem.merchandiseId,
+        quantity: clientItem.quantity,
+        updatedAt: now,
+        deleted: clientItem.deleted || false,
+      };
+    }
+
+    // Item unchanged → keep server's existing timestamp
+    return {
+      merchandiseId: clientItem.merchandiseId,
+      quantity: clientItem.quantity,
+      updatedAt: serverItem.updatedAt,
+      deleted: clientItem.deleted || false,
+    };
+  });
 }
 
 // OPTIONS /api/cart/sync - CORS preflight
@@ -120,12 +167,12 @@ export async function POST(request: NextRequest) {
 
   const now = new Date().toISOString();
 
-  // Validate and normalize cart items
-  const clientItemsResult = validateCartItems(body.items, now);
+  // Validate cart items (timestamps are optional - server assigns based on changes)
+  const clientItemsResult = validateCartItems(body.items);
   if ("error" in clientItemsResult) {
     return jsonResponse({ error: clientItemsResult.error }, 400);
   }
-  const clientItems = clientItemsResult.items;
+  const rawClientItems = clientItemsResult.items;
 
   const { env } = await getCloudflareContext();
   const cartKey = getCartKey(customerId);
@@ -139,26 +186,33 @@ export async function POST(request: NextRequest) {
   let newVersion: number;
 
   // Handle login merge: guest cart → account cart
+  // Guest cart items have real timestamps from when user added them
   if (body.isLoginMerge && body.guestCart) {
     const rawGuestItems = body.guestCart.items || [];
 
-    // Validate guest cart items the same way as client items
     if (!Array.isArray(rawGuestItems)) {
       return jsonResponse({ error: "guestCart.items must be an array" }, 400);
     }
 
-    const guestItemsResult = validateCartItems(rawGuestItems, now);
+    const guestItemsResult = validateCartItems(rawGuestItems);
     if ("error" in guestItemsResult) {
       return jsonResponse(
         { error: `Invalid guest cart: ${guestItemsResult.error}` },
         400
       );
     }
-    const guestItems = guestItemsResult.items;
+
+    // Guest cart items should have timestamps - apply server time if missing
+    const guestItems: CartItem[] = guestItemsResult.items.map((item) => ({
+      merchandiseId: item.merchandiseId,
+      quantity: item.quantity,
+      updatedAt: item.updatedAt || now,
+      deleted: item.deleted || false,
+    }));
 
     if (serverCart && serverCart.items.length > 0) {
       // Account cart exists - merge guest cart INTO account cart
-      // Union: all unique items, last-write-wins for conflicts
+      // Union: all unique items, last-write-wins by timestamp
       mergedItems = mergeCarts({ items: guestItems }, serverCart);
     } else {
       // No account cart - guest cart becomes account cart
@@ -183,18 +237,21 @@ export async function POST(request: NextRequest) {
     });
   }
 
+  // Apply timestamps based on actual changes
+  // - New items / changed quantities → server's current time (action time)
+  // - Unchanged items → keep existing server timestamp
+  const clientItems = applyTimestamps(rawClientItems, serverCart?.items, now);
+
   if (body.forceOverwrite) {
     // Force overwrite - no merge, just use client data
     mergedItems = clientItems.filter((it) => !it.deleted && it.quantity > 0);
     newVersion = serverVersion + 1;
   } else if (serverCart && clientVersion !== serverVersion) {
-    // Version mismatch - need to merge
-    // If client version is older, there were changes on server we need to incorporate
+    // Version mismatch - need to merge using timestamps
+    // Last action wins based on updatedAt timestamp
     mergedItems = mergeCarts({ items: clientItems }, serverCart);
     newVersion = serverVersion + 1;
 
-    // Return 409 with merged result so client knows there was a conflict
-    // Client should update their local state with this merged result
     const mergedCart: StoredCart = {
       customerId,
       items: mergedItems,
@@ -211,7 +268,7 @@ export async function POST(request: NextRequest) {
           "Version conflict - cart was modified elsewhere. Merged result returned.",
         cart: mergedCart,
       },
-      200 // Return 200 with conflict flag instead of 409 for easier client handling
+      200
     );
   } else {
     // Version matches or no server cart - direct update
