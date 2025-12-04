@@ -7,6 +7,12 @@
         "POLARIS_UNIFIED": "true",
         "LIQUID": "true"
       }
+    },
+    "render": {
+      "url": "https://mcp.render.com/mcp",
+      "headers": {
+        "Authorization": "Bearer rnd_rjN8vk9XBigVO03kdaCWa8QpqCle"
+      }
     }
   }
 }

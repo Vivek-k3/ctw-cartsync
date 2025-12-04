@@ -14,6 +14,6 @@ services:
       - key: SCOPES
         value: read_customers,write_customers
       - key: SHOPIFY_APP_URL
-        sync: false
+        value: https://email-shopify.onrender.com
       - key: DATABASE_URL
         sync: false

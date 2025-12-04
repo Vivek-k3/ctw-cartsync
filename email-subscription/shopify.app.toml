@@ -2,6 +2,7 @@
 
 client_id = "e7c4325025225d051171ddcc7b1d782c"
 name = "Email Subscription"
+application_url = "https://email-shopify.onrender.com"
 embedded = true
 
 [webhooks]
