@@ -150,23 +150,28 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const { firstName, lastName } = splitName(name, rawFirst, rawLast);
 
-  // Use the first offline session we have (single-shop apps)
-  const session = await prisma.session.findFirst({
-    where: { isOnline: false },
-  });
+  // Prefer explicit env vars for single-shop setups; fall back to Prisma session
+  let shop = process.env.SHOPIFY_FORM_SHOP_DOMAIN;
+  let accessToken = process.env.SHOPIFY_FORM_ADMIN_TOKEN;
 
-  if (!session) {
-    console.error(
-      "[webhooks/subscribe] No offline session found; cannot call Admin API",
-    );
-    return Response.json(
-      { error: "Shop not initialized" },
-      { status: 500, statusText: "Internal Server Error" },
-    );
+  if (!shop || !accessToken) {
+    const session = await prisma.session.findFirst({
+      where: { isOnline: false },
+    });
+
+    if (!session) {
+      console.error(
+        "[webhooks/subscribe] No offline session or env credentials found; cannot call Admin API",
+      );
+      return Response.json(
+        { error: "Shop not initialized" },
+        { status: 500, statusText: "Internal Server Error" },
+      );
+    }
+
+    shop = session.shop;
+    accessToken = session.accessToken;
   }
-
-  const shop = session.shop;
-  const accessToken = session.accessToken;
 
   try {
     // 1) Look up existing customer by email
