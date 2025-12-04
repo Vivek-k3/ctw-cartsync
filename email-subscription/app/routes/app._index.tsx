@@ -1,272 +1,320 @@
 import { useEffect } from "react";
 import type {
-  ActionFunctionArgs,
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { useFetcher } from "react-router";
+import { useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import prisma from "../db.server";
 
-export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+const GET_SUBSCRIBED_COUNT_QUERY = `
+  query GetSubscribedCount {
+    customers(first: 1, query: "email_marketing_consent_marketing_state:SUBSCRIBED") {
+      pageInfo {
+        hasNextPage
+      }
+    }
+  }
+`;
 
-  return null;
-};
-
-export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
-  const color = ["Red", "Orange", "Yellow", "Green"][
-    Math.floor(Math.random() * 4)
-  ];
-  const response = await admin.graphql(
-    `#graphql
-      mutation populateProduct($product: ProductCreateInput!) {
-        productCreate(product: $product) {
-          product {
-            id
-            title
-            handle
-            status
-            variants(first: 10) {
-              edges {
-                node {
-                  id
-                  price
-                  barcode
-                  createdAt
-                }
-              }
-            }
-          }
-        }
-      }`,
-    {
-      variables: {
-        product: {
-          title: `${color} Snowboard`,
-        },
-      },
-    },
-  );
-  const responseJson = await response.json();
-
-  const product = responseJson.data!.productCreate!.product!;
-  const variantId = product.variants.edges[0]!.node!.id!;
-
-  const variantResponse = await admin.graphql(
-    `#graphql
-    mutation shopifyReactRouterTemplateUpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-        productVariants {
+const GET_RECENT_CUSTOMERS_QUERY = `
+  query GetRecentCustomers {
+    customers(first: 10, sortKey: CREATED_AT, reverse: true) {
+      edges {
+        node {
           id
-          price
-          barcode
+          email
+          emailMarketingConsent {
+            marketingState
+            marketingOptInLevel
+          }
           createdAt
         }
       }
-    }`,
-    {
-      variables: {
-        productId: product.id,
-        variants: [{ id: variantId, price: "100.00" }],
-      },
-    },
-  );
+    }
+  }
+`;
 
-  const variantResponseJson = await variantResponse.json();
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+  const { admin, session } = await authenticate.admin(request);
+  const shop = session.shop;
+
+  // Get subscription stats from database
+  const [totalSubscriptions, recentEvents, todaySubscriptions, thisWeekSubscriptions] = await Promise.all([
+    prisma.subscriptionEvent.count({
+      where: { shop, status: "success" },
+    }),
+    prisma.subscriptionEvent.findMany({
+      where: { shop },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+    }),
+    prisma.subscriptionEvent.count({
+      where: {
+        shop,
+        status: "success",
+        createdAt: {
+          gte: new Date(new Date().setHours(0, 0, 0, 0)),
+        },
+      },
+    }),
+    prisma.subscriptionEvent.count({
+      where: {
+        shop,
+        status: "success",
+        createdAt: {
+          gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+        },
+      },
+    }),
+  ]);
+
+  // Get total subscribed customers from Shopify
+  let totalSubscribedCustomers = 0;
+  try {
+    const countResponse = await admin.graphql(GET_SUBSCRIBED_COUNT_QUERY);
+    const countJson = await countResponse.json();
+    // Note: Shopify doesn't return exact count, we'd need to paginate
+    // For now, we'll use our database count as approximation
+  } catch (err) {
+    console.error("Failed to fetch customer count", err);
+  }
+
+  // Get recent customers
+  let recentCustomers: Array<{
+    id: string;
+    email: string | null;
+    emailMarketingConsent: {
+      marketingState: string;
+      marketingOptInLevel: string;
+    } | null;
+    createdAt: string;
+  }> = [];
+
+  try {
+    const customersResponse = await admin.graphql(GET_RECENT_CUSTOMERS_QUERY);
+    const customersJson = await customersResponse.json();
+    recentCustomers =
+      customersJson.data?.customers?.edges?.map((edge: any) => edge.node) ?? [];
+  } catch (err) {
+    console.error("Failed to fetch recent customers", err);
+  }
 
   return {
-    product: responseJson!.data!.productCreate!.product,
-    variant:
-      variantResponseJson!.data!.productVariantsBulkUpdate!.productVariants,
+    totalSubscriptions,
+    todaySubscriptions,
+    thisWeekSubscriptions,
+    recentEvents,
+    recentCustomers,
   };
 };
 
 export default function Index() {
-  const fetcher = useFetcher<typeof action>();
-
   const shopify = useAppBridge();
-  const isLoading =
-    ["loading", "submitting"].includes(fetcher.state) &&
-    fetcher.formMethod === "POST";
+  const {
+    totalSubscriptions,
+    todaySubscriptions,
+    thisWeekSubscriptions,
+    recentEvents,
+    recentCustomers,
+  } = useLoaderData<typeof loader>();
 
-  useEffect(() => {
-    if (fetcher.data?.product?.id) {
-      shopify.toast.show("Product created");
-    }
-  }, [fetcher.data?.product?.id, shopify]);
-
-  const generateProduct = () => fetcher.submit({}, { method: "POST" });
+  const errorCount = recentEvents.filter((e) => e.status === "error").length;
+  const successRate =
+    recentEvents.length > 0
+      ? ((recentEvents.length - errorCount) / recentEvents.length) * 100
+      : 100;
 
   return (
-    <s-page heading="Email Subscription automation">
+    <s-page heading="Email Subscription Dashboard">
       <s-section>
-        <s-paragraph>
-          New Shopify customers created in this store are automatically{" "}
-          <s-text emphasis>subscribed to email marketing</s-text> by this app.
-        </s-paragraph>
-        <s-paragraph>
-          The app listens to the{" "}
-          <s-code>customers/create</s-code> webhook and calls{" "}
-          <s-code>customerEmailMarketingConsentUpdate</s-code> to set{" "}
-          <s-code>marketingState = SUBSCRIBED</s-code> with{" "}
-          <s-code>marketingOptInLevel = SINGLE_OPT_IN</s-code>.
-        </s-paragraph>
-        <s-paragraph tone="subdued">
-          To change this behavior, you can disable or remove the app, or we can
-          extend this screen later with toggles and per-segment rules.
-        </s-paragraph>
-      </s-section>
-
-      <s-section heading="Developer tools">
-        <s-paragraph>
-          Use the button below to generate a throwaway product and verify that
-          Admin API access is working as expected.
-        </s-paragraph>
-        <s-button slot="primary-action" onClick={generateProduct}>
-          Generate a test product
-        </s-button>
-      </s-section>
-
-      <s-section heading="Congrats on creating a new Shopify app 🎉">
-        <s-paragraph>
-          This embedded app template uses{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/tools/app-bridge"
-            target="_blank"
-          >
-            App Bridge
-          </s-link>{" "}
-          interface examples like an{" "}
-          <s-link href="/app/additional">additional page in the app nav</s-link>
-          , as well as an{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            Admin GraphQL
-          </s-link>{" "}
-          mutation demo, to provide a starting point for app development.
-        </s-paragraph>
-      </s-section>
-      <s-section heading="Get started with products (template demo)">
-        <s-paragraph>
-          Generate a product with GraphQL and get the JSON output for that
-          product. Learn more about the{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql/latest/mutations/productCreate"
-            target="_blank"
-          >
-            productCreate
-          </s-link>{" "}
-          mutation in our API references.
-        </s-paragraph>
-        <s-stack direction="inline" gap="base">
-          <s-button
-            onClick={generateProduct}
-            {...(isLoading ? { loading: true } : {})}
-          >
-            Generate a product
-          </s-button>
-          {fetcher.data?.product && (
-            <s-button
-              onClick={() => {
-                shopify.intents.invoke?.("edit:shopify/Product", {
-                  value: fetcher.data?.product?.id,
-                });
-              }}
-              target="_blank"
-              variant="tertiary"
+        <s-stack direction="block" gap="large">
+          {/* Stats Cards */}
+          <s-stack direction="inline" gap="base">
+            <s-box
+              padding="large"
+              borderWidth="base"
+              borderRadius="base"
+              background="surface"
+              minWidth="200px"
             >
-              Edit product
-            </s-button>
-          )}
-        </s-stack>
-        {fetcher.data?.product && (
-          <s-section heading="productCreate mutation">
-            <s-stack direction="block" gap="base">
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.product, null, 2)}</code>
-                </pre>
-              </s-box>
+              <s-stack direction="block" gap="tight">
+                <s-text tone="subdued" size="small">
+                  Total Subscriptions
+                </s-text>
+                <s-heading size="large">{totalSubscriptions.toLocaleString()}</s-heading>
+              </s-stack>
+            </s-box>
 
-              <s-heading>productVariantsBulkUpdate mutation</s-heading>
+            <s-box
+              padding="large"
+              borderWidth="base"
+              borderRadius="base"
+              background="surface"
+              minWidth="200px"
+            >
+              <s-stack direction="block" gap="tight">
+                <s-text tone="subdued" size="small">
+                  Today
+                </s-text>
+                <s-heading size="large">{todaySubscriptions.toLocaleString()}</s-heading>
+              </s-stack>
+            </s-box>
+
+            <s-box
+              padding="large"
+              borderWidth="base"
+              borderRadius="base"
+              background="surface"
+              minWidth="200px"
+            >
+              <s-stack direction="block" gap="tight">
+                <s-text tone="subdued" size="small">
+                  This Week
+                </s-text>
+                <s-heading size="large">{thisWeekSubscriptions.toLocaleString()}</s-heading>
+              </s-stack>
+            </s-box>
+
+            <s-box
+              padding="large"
+              borderWidth="base"
+              borderRadius="base"
+              background="surface"
+              minWidth="200px"
+            >
+              <s-stack direction="block" gap="tight">
+                <s-text tone="subdued" size="small">
+                  Success Rate
+                </s-text>
+                <s-heading size="large">
+                  {successRate.toFixed(1)}%
+                </s-heading>
+              </s-stack>
+            </s-box>
+          </s-stack>
+
+          {/* Recent Activity */}
+          <s-section heading="Recent Activity">
+            {recentEvents.length === 0 ? (
+              <s-paragraph tone="subdued">
+                No subscription events yet. Events will appear here as customers are subscribed.
+              </s-paragraph>
+            ) : (
               <s-box
                 padding="base"
                 borderWidth="base"
                 borderRadius="base"
                 background="subdued"
               >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.variant, null, 2)}</code>
-                </pre>
+                <s-stack direction="block" gap="tight">
+                  {recentEvents.slice(0, 5).map((event) => (
+                    <s-box
+                      key={event.id}
+                      padding="base"
+                      background="surface"
+                      borderRadius="tight"
+                    >
+                      <s-stack direction="inline" gap="base" align="space-between">
+                        <s-stack direction="block" gap="extra-tight">
+                          <s-text emphasis>{event.email}</s-text>
+                          <s-text tone="subdued" size="small">
+                            {event.source} • {new Date(event.createdAt).toLocaleString()}
+                          </s-text>
+                        </s-stack>
+                        <s-badge
+                          tone={event.status === "success" ? "success" : "critical"}
+                        >
+                          {event.status}
+                        </s-badge>
+                      </s-stack>
+                    </s-box>
+                  ))}
+                </s-stack>
               </s-box>
-            </s-stack>
+            )}
+            {recentEvents.length > 5 && (
+              <s-link href="/app/activity">View all activity →</s-link>
+            )}
           </s-section>
-        )}
+
+          {/* Recent Customers */}
+          <s-section heading="Recent Customers">
+            {recentCustomers.length === 0 ? (
+              <s-paragraph tone="subdued">No customers found.</s-paragraph>
+            ) : (
+              <s-box
+                padding="base"
+                borderWidth="base"
+                borderRadius="base"
+                background="subdued"
+              >
+                <s-stack direction="block" gap="tight">
+                  {recentCustomers.slice(0, 5).map((customer) => (
+                    <s-box
+                      key={customer.id}
+                      padding="base"
+                      background="surface"
+                      borderRadius="tight"
+                    >
+                      <s-stack direction="inline" gap="base" align="space-between">
+                        <s-stack direction="block" gap="extra-tight">
+                          <s-text emphasis>{customer.email || "No email"}</s-text>
+                          <s-text tone="subdued" size="small">
+                            Created {new Date(customer.createdAt).toLocaleString()}
+                          </s-text>
+                        </s-stack>
+                        <s-badge
+                          tone={
+                            customer.emailMarketingConsent?.marketingState ===
+                            "SUBSCRIBED"
+                              ? "success"
+                              : "subdued"
+                          }
+                        >
+                          {customer.emailMarketingConsent?.marketingState ||
+                            "UNKNOWN"}
+                        </s-badge>
+                      </s-stack>
+                    </s-box>
+                  ))}
+                </s-stack>
+              </s-box>
+            )}
+          </s-section>
+        </s-stack>
       </s-section>
 
-      <s-section slot="aside" heading="App template specs">
-        <s-paragraph>
-          <s-text>Framework: </s-text>
-          <s-link href="https://reactrouter.com/" target="_blank">
-            React Router
+      <s-section slot="aside" heading="Quick Actions">
+        <s-stack direction="block" gap="base">
+          <s-link href="/app/backfill-subscriptions">
+            <s-button variant="secondary" fullWidth>
+              Backfill Subscriptions
+            </s-button>
           </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Interface: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/app-home/using-polaris-components"
-            target="_blank"
-          >
-            Polaris web components
+          <s-link href="/app/activity">
+            <s-button variant="secondary" fullWidth>
+              View Activity Log
+            </s-button>
           </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>API: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            GraphQL
+          <s-link href="/app/settings">
+            <s-button variant="secondary" fullWidth>
+              App Settings
+            </s-button>
           </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Database: </s-text>
-          <s-link href="https://www.prisma.io/" target="_blank">
-            Prisma
-          </s-link>
-        </s-paragraph>
+        </s-stack>
       </s-section>
 
-      <s-section slot="aside" heading="Next steps">
-        <s-unordered-list>
-          <s-list-item>
-            Build an{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/getting-started/build-app-example"
-              target="_blank"
-            >
-              example app
-            </s-link>
-          </s-list-item>
-          <s-list-item>
-            Explore Shopify&apos;s API with{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/tools/graphiql-admin-api"
-              target="_blank"
-            >
-              GraphiQL
-            </s-link>
-          </s-list-item>
+      <s-section slot="aside" heading="How it works">
+        <s-paragraph size="small">
+          This app automatically subscribes customers to email marketing when:
+        </s-paragraph>
+        <s-unordered-list size="small">
+          <s-list-item>New customers are created (via webhook)</s-list-item>
+          <s-list-item>Forms submit to /webhooks/subscribe</s-list-item>
+          <s-list-item>You run the backfill tool</s-list-item>
         </s-unordered-list>
       </s-section>
     </s-page>

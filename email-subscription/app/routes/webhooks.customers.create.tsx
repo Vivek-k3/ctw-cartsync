@@ -1,5 +1,6 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
+import prisma from "../db.server";
 
 // Admin GraphQL mutation to set email marketing consent
 const UPDATE_EMAIL_MARKETING_CONSENT_MUTATION = `
@@ -45,12 +46,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return new Response();
   }
 
-  if (!session) {
+  if (!session || !session.accessToken) {
     console.warn(
-      "[customers/create] webhook without session (possibly after uninstall), skipping"
+      "[customers/create] webhook without session or accessToken (possibly after uninstall), skipping"
     );
     return new Response();
   }
+
+  const accessToken = session.accessToken;
 
   try {
     const response = await fetch(
@@ -59,7 +62,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Shopify-Access-Token": session.accessToken,
+          "X-Shopify-Access-Token": accessToken,
         },
         body: JSON.stringify({
           query: UPDATE_EMAIL_MARKETING_CONSENT_MUTATION,
@@ -102,10 +105,35 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         "[customers/create] userErrors while setting marketing consent",
         userErrors
       );
+      // Log error event
+      await prisma.subscriptionEvent.create({
+        data: {
+          shop,
+          customerId,
+          email,
+          source: "webhook",
+          status: "error",
+          error: userErrors.map((e) => e.message).join("; "),
+        },
+      }).catch((err) => {
+        console.error("[customers/create] Failed to log event", err);
+      });
     } else {
       console.log(
         `[customers/create] marketing email SUBSCRIBED for ${email} successfully`
       );
+      // Log success event
+      await prisma.subscriptionEvent.create({
+        data: {
+          shop,
+          customerId,
+          email,
+          source: "webhook",
+          status: "success",
+        },
+      }).catch((err) => {
+        console.error("[customers/create] Failed to log event", err);
+      });
     }
   } catch (err) {
     console.error("[customers/create] failed to update marketing consent", err);

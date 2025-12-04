@@ -10,7 +10,7 @@ generator client {
 // See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
   provider = "sqlite"
-  url      = "file:dev.sqlite"
+  url      = env("DATABASE_URL")
 }
 
 model Session {
@@ -29,4 +29,19 @@ model Session {
   locale        String?
   collaborator  Boolean?  @default(false)
   emailVerified Boolean?  @default(false)
+}
+
+model SubscriptionEvent {
+  id          String   @id @default(uuid())
+  shop        String
+  customerId  String
+  email       String
+  source      String   // "webhook", "form", "backfill", "manual"
+  status      String   // "success", "error"
+  error       String?
+  metadata    String?  // JSON string for additional data
+  createdAt   DateTime @default(now())
+
+  @@index([shop, createdAt])
+  @@index([email])
 }

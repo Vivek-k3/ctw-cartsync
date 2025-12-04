@@ -8,6 +8,7 @@ import { useFetcher } from "react-router";
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
+import prisma from "../db.server";
 
 const LIST_UNSUBSCRIBED_QUERY = `
   query UnsubscribedCustomers($cursor: String) {
@@ -140,6 +141,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
 
       updatedCount += 1;
+
+      // Log successful backfill event
+      await prisma.subscriptionEvent.create({
+        data: {
+          shop: session.shop,
+          customerId: id,
+          email,
+          source: "backfill",
+          status: "success",
+        },
+      }).catch((err) => {
+        console.error("[backfill-subscriptions] Failed to log event", err);
+      });
     }
 
     if (!json.data.customers.pageInfo.hasNextPage) {

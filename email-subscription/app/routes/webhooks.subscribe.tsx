@@ -348,11 +348,40 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         "[webhooks/subscribe] userErrors while setting marketing consent",
         consentUserErrors,
       );
+      // Log error event
+      await prisma.subscriptionEvent.create({
+        data: {
+          shop,
+          customerId,
+          email: normalizedEmail,
+          source: "form",
+          status: "error",
+          error: consentUserErrors.map((e) => e.message).join("; "),
+        },
+      }).catch((err) => {
+        console.error("[webhooks/subscribe] Failed to log event", err);
+      });
       return Response.json(
         { error: "Failed to update subscription", details: consentUserErrors },
         { status: 400, statusText: "Bad Request" },
       );
     }
+
+    // Log successful subscription
+    await prisma.subscriptionEvent.create({
+      data: {
+        shop,
+        customerId,
+        email: normalizedEmail,
+        source: "form",
+        status: "success",
+        metadata: message
+          ? JSON.stringify({ firstName, lastName, message })
+          : JSON.stringify({ firstName, lastName }),
+      },
+    }).catch((err) => {
+      console.error("[webhooks/subscribe] Failed to log event", err);
+    });
 
     if (message) {
       console.log(
